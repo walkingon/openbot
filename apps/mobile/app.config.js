@@ -42,8 +42,14 @@ function applySelfhostOverrides(config) {
     android.versionCode = Number.parseInt(rawVersionCode, 10);
   }
 
-  if (existsSync(join(__dirname, GOOGLE_SERVICES_FILE))) {
-    android.googleServicesFile = GOOGLE_SERVICES_FILE;
+  const customGoogleServicesFile = process.env.OPENBOT_ANDROID_GOOGLE_SERVICES_FILE?.trim();
+  if (customGoogleServicesFile) {
+    if (!existsSync(customGoogleServicesFile)) {
+      throw new Error(`OPENBOT_ANDROID_GOOGLE_SERVICES_FILE does not exist: "${customGoogleServicesFile}".`);
+    }
+    android.googleServicesFile = customGoogleServicesFile;
+  } else {
+    delete android.googleServicesFile;
   }
 
   const rawAppName = process.env.OPENBOT_ANDROID_APP_NAME?.trim();

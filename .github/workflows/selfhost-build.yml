@@ -270,20 +270,50 @@ jobs:
       - name: Prebuild Android project
         working-directory: apps/mobile
         shell: bash
+        env:
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           set -euo pipefail
           mobile_version="$(node -p 'require("./package.json").version')"
           echo "MOBILE_VERSION=$mobile_version" >> "$GITHUB_ENV"
 
+          gs_file="$RUNNER_TEMP/selfhost-google-services.json"
+          if [[ -n "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" ]]; then
+            printf '%s' "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" | tr -d '\r\n ' | base64 -d > "$gs_file"
+            chmod 600 "$gs_file"
+            if ! jq -e --arg pkg "$OPENBOT_ANDROID_PACKAGE" '
+              any(.client[]?; .client_info.android_client_info.package_name == $pkg)
+            ' "$gs_file" >/dev/null; then
+              echo "ANDROID_GOOGLE_SERVICES_JSON_BASE64 does not contain a client for package '$OPENBOT_ANDROID_PACKAGE'." >&2
+              exit 1
+            fi
+            export OPENBOT_ANDROID_GOOGLE_SERVICES_FILE="$gs_file"
+            echo "OPENBOT_ANDROID_GOOGLE_SERVICES_FILE=$gs_file" >> "$GITHUB_ENV"
+          fi
+
           EXPO_CLI="$(node -p 'require.resolve("expo/bin/cli")')"
           config_json="$(node "$EXPO_CLI" config --type public --json)"
-          jq -e '
-            .updates.enabled == false
-            and ((.updates.url // null) == null)
-            and (.android.package == env.OPENBOT_ANDROID_PACKAGE)
-          ' <<<"$config_json" >/dev/null
+          if [[ -n "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" ]]; then
+            jq -e '
+              .updates.enabled == false
+              and ((.updates.url // null) == null)
+              and (.android.package == env.OPENBOT_ANDROID_PACKAGE)
+              and (.android.googleServicesFile == env.OPENBOT_ANDROID_GOOGLE_SERVICES_FILE)
+            ' <<<"$config_json" >/dev/null
+          else
+            jq -e '
+              .updates.enabled == false
+              and ((.updates.url // null) == null)
+              and (.android.package == env.OPENBOT_ANDROID_PACKAGE)
+              and ((.android.googleServicesFile // null) == null)
+            ' <<<"$config_json" >/dev/null
+          fi
 
           node "$EXPO_CLI" prebuild --platform android --clean --no-install
+
+          if [[ -z "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" ]]; then
+            test ! -e android/app/google-services.json
+          fi
 
           manifest="android/app/src/main/AndroidManifest.xml"
           if ! grep -qE 'android:name="expo\.modules\.updates\.ENABLED"[^>]*android:value="false"|android:value="false"[^>]*android:name="expo\.modules\.updates\.ENABLED"' "$manifest"; then
@@ -349,10 +379,10 @@ jobs:
           trap 'kill $!' EXIT
           ./gradlew assembleRelease --no-daemon --stacktrace "-PreactNativeArchitectures=$ANDROID_ABIS"
 
-      - name: Remove temporary keystore
+      - name: Remove temporary credentials
         if: always()
         shell: bash
-        run: rm -f "$RUNNER_TEMP/selfhost-release.keystore"
+        run: rm -f "$RUNNER_TEMP/selfhost-release.keystore" "$RUNNER_TEMP/selfhost-google-services.json"
 
       - name: Verify and package Android APK
         shell: bash
