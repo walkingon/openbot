@@ -20,6 +20,7 @@ import { version as developmentVersion } from "../../../package.json";
 import type { AgentService } from "../../backend/agent-service";
 import type { BrowserHost } from "../../backend/browser-host";
 import type { MailboxStore } from "../../backend/mailbox-store";
+import { centralAuthApiUrl } from "../account-service-access";
 import type { AgentDefaultsPreferenceStore } from "../agent-defaults-preference-store";
 import type { AgentMemoryLimitSetting } from "../agent-memory-limit-preference-store";
 import type { AnalyticsPreferenceService } from "../analytics-preference-service";
@@ -197,6 +198,7 @@ export function appIpcHandlers({
           version,
           platform,
           variant: appVariant,
+          authApiUrl: centralAuthApiUrl(),
           ...(analyticsCaptureUrl ? { analyticsCaptureUrl } : {}),
           ...(analyticsInstallId ? { analyticsInstallId } : {}),
           ...(softwareRendering ? { softwareRendering } : {}),

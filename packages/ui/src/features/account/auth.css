@@ -79,6 +79,14 @@
   font-weight: 560;
 }
 
+.account-login-server-host {
+  margin: 6px 0 0;
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+
 .account-login-error {
   margin: 0;
   color: var(--openbot-danger);

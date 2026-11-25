@@ -193,6 +193,17 @@ const valid: [string, (value: unknown) => unknown, unknown][] = [
       dynamicIslandUnavailable: true,
     } satisfies AppInfo,
   ],
+  [
+    "app info with an auth API URL",
+    decodeAppInfo,
+    {
+      name: "OpenBot",
+      version: "1.0.0",
+      platform: "win32",
+      variant: "production",
+      authApiUrl: "https://api.example.com",
+    } satisfies AppInfo,
+  ],
   ["sent message stats", decodeSentMessageStats, { firstSentAt: "2026-11-01T09:30:00.000Z", sentCount: 12 }],
   ["sent message stats before the first message", decodeSentMessageStats, { firstSentAt: null, sentCount: 0 }],
   [
@@ -424,6 +435,11 @@ const malformed: [string, (value: unknown) => unknown, unknown][] = [
     "app info with a Dynamic Island availability that is not a boolean",
     decodeAppInfo,
     { name: "OpenBot", version: "1.0.0", platform: "linux", variant: "production", dynamicIslandUnavailable: "yes" },
+  ],
+  [
+    "app info with an auth API URL that is not text",
+    decodeAppInfo,
+    { name: "OpenBot", version: "1.0.0", platform: "win32", variant: "production", authApiUrl: 123 },
   ],
   ["a voice server with its key", decodeVoiceServerSettings, { ...voiceServer, apiKey: "sk-secret" }],
   [

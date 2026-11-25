@@ -15,6 +15,7 @@ export interface AppInfo {
   version: string;
   platform: DesktopPlatform;
   variant: AppVariant;
+  authApiUrl?: string;
   analyticsCaptureUrl?: string;
   analyticsInstallId?: string;
   softwareRendering?: boolean;

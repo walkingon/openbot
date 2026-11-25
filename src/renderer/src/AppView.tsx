@@ -101,6 +101,7 @@ export function AppAccessGate() {
                 fallback={
                   <AccountLogin
                     variant={platform.appInfo()?.variant ?? "production"}
+                    serverHost={serverHostFromUrl(platform.appInfo()?.authApiUrl)}
                     state={auth.centralAuth()}
                     onRetry={auth.retryCentralAccount}
                     onRequestEmailCode={auth.requestEmailCode}
@@ -217,4 +218,13 @@ export function AppAccessGate() {
       </Show>
     </>
   );
+}
+
+function serverHostFromUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).host || undefined;
+  } catch {
+    return undefined;
+  }
 }

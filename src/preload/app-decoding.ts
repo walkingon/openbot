@@ -173,6 +173,7 @@ export function decodeAppInfo(value: unknown): AppInfo {
   const {
     platform,
     variant,
+    authApiUrl,
     analyticsCaptureUrl,
     analyticsInstallId,
     softwareRendering,
@@ -182,6 +183,7 @@ export function decodeAppInfo(value: unknown): AppInfo {
   } = info;
   if (!isOneOf(["darwin", "win32", "linux"] as const, platform)) throw new Error("Invalid platform.");
   if (!isOneOf(["production", "dev", "preview"] as const, variant)) throw new Error("Invalid variant.");
+  if (authApiUrl !== undefined && !isString(authApiUrl)) throw new Error("Invalid auth API URL.");
   if (analyticsCaptureUrl !== undefined && !isString(analyticsCaptureUrl))
     throw new Error("Invalid analytics capture URL.");
   if (analyticsInstallId !== undefined && !isString(analyticsInstallId))
@@ -198,6 +200,7 @@ export function decodeAppInfo(value: unknown): AppInfo {
     version: requiredString(info, "version"),
     platform,
     variant,
+    ...(authApiUrl === undefined ? {} : { authApiUrl }),
     ...(analyticsCaptureUrl === undefined ? {} : { analyticsCaptureUrl }),
     ...(analyticsInstallId === undefined ? {} : { analyticsInstallId }),
     ...(softwareRendering === undefined ? {} : { softwareRendering }),

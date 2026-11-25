@@ -15,6 +15,7 @@ import { OtpInput, type OtpInputStatus } from "./OtpInput";
 
 interface AccountLoginProps {
   variant: AppVariant;
+  serverHost?: string;
   state: CentralAuthState;
   onRetry: () => Promise<void>;
   onRequestEmailCode: (email: string) => Promise<void>;
@@ -473,6 +474,7 @@ export function AccountLogin(props: AccountLoginProps) {
               </Show>
             </Show>
           </p>
+          <Show when={props.serverHost}>{(serverHost) => <p class="account-login-server-host">{serverHost()}</p>}</Show>
 
           <Show when={connecting()}>
             <div class="account-login-loader" role="status" aria-live="polite">
