@@ -14,6 +14,8 @@ runtime_config="/tmp/openbot-turnserver.conf"
 cp /etc/coturn/openbot.conf "$runtime_config"
 {
   echo "external-ip=${TURN_PUBLIC_IP}"
+  # SELFHOST_PATCH: bind relay sockets only to TURN_PUBLIC_IP, not Docker bridge IPs (172.17/18.0.1)
+  echo "relay-ip=${TURN_PUBLIC_IP}"
   echo "realm=${TURN_REALM}"
   echo "server-name=${TURN_REALM}"
   echo "static-auth-secret=${TURN_SHARED_SECRET}"
