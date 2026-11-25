@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOpenBotLogger, toLogValue } from "@openbot/logging";
@@ -17,11 +16,7 @@ const cloudflareEnvironment = readCloudflareEnvironment(process.argv.slice(2));
 const environmentArgs = cloudflareEnvironment ? ["--env", cloudflareEnvironment] : [];
 
 async function main(): Promise<void> {
-  if (!cloudflareEnvironment) {
-    requiredSecret("OPENPANEL_CLIENT_ID");
-    requiredSecret("OPENPANEL_CLIENT_SECRET");
-    assertLandingBeam();
-  }
+  // SELFHOST_PATCH: no OpenPanel analytics and no vendored landing beam
   assertFcmServiceAccount();
   await putRequiredSecret("EMAIL_SMTP_PASSWORD");
   await putRequiredSecret("SKILLS_ADMIN_TOKEN");
@@ -47,10 +42,7 @@ async function main(): Promise<void> {
     await putTestAllowList();
     await putOptionalSecret("HOSTED_SERVERS_DEVELOPER_KEY");
   }
-  if (!cloudflareEnvironment) {
-    await putRequiredSecret("OPENPANEL_CLIENT_ID");
-    await putRequiredSecret("OPENPANEL_CLIENT_SECRET");
-  }
+  // SELFHOST_PATCH: OpenPanel secrets skipped
   await putOptionalSecretSet("APNS_PRIVATE_KEY", "APNS_KEY_ID");
   await putOptionalSecret("FCM_SERVICE_ACCOUNT");
   await run(wranglerExecutable, ["d1", "migrations", "apply", "DB", "--remote", ...environmentArgs], {
@@ -73,14 +65,6 @@ async function main(): Promise<void> {
   await run(wranglerExecutable, ["deploy", "--keep-vars", ...environmentArgs], {
     label: "Auth API deployment",
   });
-}
-
-function assertLandingBeam(): void {
-  const port = join(apiRoot, "src", "vendor", "laser-flow", "LandingLaserFlow.tsx");
-  if (existsSync(port)) return;
-  throw new Error(
-    "The home page beam is missing. Clone nightly-labs/openbot-laser-flow into apps/auth-api/src/vendor/laser-flow.",
-  );
 }
 
 function requiredSecret(name: string): string {
@@ -157,7 +141,7 @@ async function run(
 ): Promise<void> {
   await new Promise<void>((resolveProcess, rejectProcess) => {
     const environment = { ...process.env, ...options.env };
-    if (executable === wranglerExecutable) delete environment.CLOUDFLARE_API_TOKEN;
+    // SELFHOST_PATCH: keep CLOUDFLARE_API_TOKEN for a token-based deploy
     const child = spawn(executable, args, {
       cwd: apiRoot,
       env: environment,

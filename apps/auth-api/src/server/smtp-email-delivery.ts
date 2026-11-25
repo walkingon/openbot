@@ -578,7 +578,8 @@ const writeCommand = Effect.fn("SmtpEmail.writeCommand")(
 function validateConfig(config: SmtpEmailConfig): void {
   if (!isValidHostname(config.host)) throw new Error("smtp_invalid_host");
   if (config.port !== 465) throw new Error("smtp_port_must_be_465");
-  validateEmail(config.username, "username");
+  // SELFHOST_PATCH: allow a provider token such as Resend's "resend" as the SMTP user name
+  if (!config.username || hasHeaderBreak(config.username)) throw new Error("smtp_invalid_username");
   validateEmail(config.from, "sender");
   if (!config.password || hasHeaderBreak(config.password)) throw new Error("smtp_invalid_password");
 }
