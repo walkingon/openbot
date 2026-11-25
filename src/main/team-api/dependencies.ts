@@ -21,6 +21,7 @@ import type {
   TeamPresenceSnapshot,
   UpdateHostIdentityInput,
   VoiceLiveEvent,
+  VoiceTranscriptionResult,
 } from "@openbot/contracts/ipc";
 import type { Logger } from "@openbot/logging";
 import type { Effect } from "effect";
@@ -52,9 +53,11 @@ import type { BitwardenConnectorService } from "../bitwarden-connector-service";
 import type { BrowserProfileService } from "../browser-profile-service";
 import type { BrowserViewGateway } from "../browser-view-gateway";
 import type { BrowsingMemoryPreferenceStore } from "../browsing-memory-preference-store";
+import type { CacheExpiryCompactionControl } from "../cache-expiry-compaction-preference-store";
 import type { ChannelFolders } from "../channel-folders";
 import type { ClaudeCompactWindowControl } from "../claude-compact-window-preference-store";
 import type { ClaudeUserSetupControl } from "../claude-user-setup-preference-store";
+import type { ClientBrowserHub } from "../client-browser-hub";
 import type { CustomAgentChanges } from "../custom-agent-changes";
 import type { PeerCustomProviderChanges } from "../custom-provider-changes";
 import type { GitHubConnectorService } from "../github-connector-service";
@@ -64,7 +67,9 @@ import type { HostEventsApi } from "../host-events-api";
 import type { HostEventsService } from "../host-events-service";
 import type { HostReleaseService } from "../host-release-service";
 import type { HostService } from "../host-service";
+import type { HostSignalHomeService } from "../host-signal-home";
 import type { HostTurnLimitsPreferenceStore } from "../host-turn-limits-preference-store";
+import type { HostVoiceModelService } from "../host-voice-model";
 import type { HostedSiteDesktopService } from "../hosted-site-service";
 import type { InstanceTransferService } from "../instance-transfer-service";
 import type { McpToolRuntimePreparation } from "../ipc/mcp-server-handlers";
@@ -99,6 +104,8 @@ import type { SkillLearningPreferenceStore } from "../skill-learning-preference-
 import type { SkillMarketplaceService } from "../skill-marketplace-service";
 import type { TeamStore } from "../team-store";
 import type { VaultService } from "../vault-service";
+import type { VoiceOperationError } from "../voice-model-service";
+import type { WorkflowFileExporter } from "../workflow-file-export";
 import type { WorkflowFoldersService } from "../workflow-folders-service";
 
 type TeamApiAgentMethods = Pick<
@@ -252,6 +259,7 @@ export interface TeamApiConnectors {
     | "setWhatsAppOwnNumber"
     | "setWhatsAppWorkingMessage"
     | "setWhatsAppStatusReactions"
+    | "setWhatsAppSenderReadOnly"
   >;
 }
 
@@ -334,6 +342,7 @@ export type TeamApiAgentTasks = Pick<
   AgentService,
   | "listAgents"
   | "listTasks"
+  | "listArchivedTasks"
   | "readTask"
   | "readTaskPage"
   | "readTaskAround"
@@ -378,6 +387,7 @@ export type TeamApiWorkflows = Pick<
   | "get"
   | "create"
   | "rename"
+  | "setPaused"
   | "remove"
   | "saveGraph"
   | "versions"
@@ -403,6 +413,7 @@ export type TeamApiWorkflows = Pick<
 > &
   Pick<HostEventsService, "rotateWorkflowSecret"> & {
     github?: WorkflowGitHubDirectory;
+    files?: Pick<WorkflowFileExporter, "source">;
   };
 
 export type TeamApiCrm = CrmPeopleOperations;
@@ -456,6 +467,8 @@ export interface TeamApiAdmin {
   restart?: { request(memberId: string): void };
   ownerTransfer?: true;
   timezone?: Pick<ServerTimezonePreferenceStore, "get" | "set">;
+  voiceModel?: Pick<HostVoiceModelService, "snapshot" | "change">;
+  signalHome?: Pick<HostSignalHomeService, "snapshot" | "set">;
   turnLimits?: Pick<HostTurnLimitsPreferenceStore, "get" | "set">;
   personality?: Pick<ServerPersonalityPreferenceStore, "get" | "set">;
   hostKey?: { rotate(): Effect.Effect<{ publicKey: string }, RemoteWorkflowError> };
@@ -470,13 +483,14 @@ export interface TeamApiAdmin {
   browsingMemory?: BrowsingMemoryPreferenceStore;
   promptCacheTtl?: Pick<PromptCacheTtlPreferenceStore, "get" | "set">;
   claudeUserSetup?: ClaudeUserSetupControl;
+  cacheExpiryCompaction?: CacheExpiryCompactionControl;
   claudeCompactWindow?: ClaudeCompactWindowControl;
   providerEnvironment?: Pick<ProviderEnvironmentControl, "get" | "set">;
   providerDetection?: {
     detection: Pick<ProviderDetection, "scanModelServers" | "scanAgents" | "discoverModels">;
     settings: Pick<ProviderDetectionSettingsStore, "get" | "set">;
   };
-  modelVisibility?: Pick<ModelVisibility, "settings" | "set" | "picker" | "listings">;
+  modelVisibility?: Pick<ModelVisibility, "settings" | "set" | "picker" | "listings" | "kept">;
   defaultProvider?: TeamApiDefaultProvider;
   routineResults?: TeamApiRoutineResults;
   routineRunCommand?: Pick<AgentService, "listAgents" | "automationRunCommand">;
@@ -598,6 +612,15 @@ export type TeamApiLiveVoice = Pick<AgentService, "startLiveVoice" | "stopLiveVo
   subscribe(listener: (event: VoiceLiveEvent, memberId: string | null) => void): () => void;
 };
 
+export interface TeamApiVoiceTranscription {
+  transcribe(audio: Uint8Array): Effect.Effect<VoiceTranscriptionResult, VoiceOperationError>;
+}
+
+export type TeamApiClientBrowser = Pick<
+  ClientBrowserHub,
+  "setPresence" | "resolve" | "sessionEnded" | "subscribe" | "shares"
+>;
+
 export type TeamApiAgentAccess = Pick<AgentAccessStore, "copyAgent" | "get" | "levels" | "set" | "subscribe">;
 export type TeamApiServerAudit = Pick<ServerAuditStore, "read">;
 
@@ -625,6 +648,8 @@ export interface TeamApiOptions {
   machine?: TeamApiMachine;
   backgroundProcesses?: TeamApiBackgroundProcesses;
   liveVoice?: TeamApiLiveVoice;
+  voiceTranscription?: TeamApiVoiceTranscription;
+  clientBrowser?: TeamApiClientBrowser;
   hostedSites?: TeamApiHostedSites;
   agentImport?: TeamApiAgentImport;
   hermesImport?: TeamApiHermesImport;

@@ -36,7 +36,7 @@ import {
 import { type DynamicRecord, isNumber, isOneOf, isString } from "@openbot/contracts/runtime-values";
 import { QueueEditRejectedError } from "@openbot/contracts/team-protocol/queue-edit-v1";
 import { sourceText } from "@openbot/i18n/source";
-import { redactText } from "@openbot/logging";
+import { createOpenBotLogger, redactText } from "@openbot/logging";
 import { Effect, Result } from "effect";
 import {
   AttachmentFiles,
@@ -60,11 +60,13 @@ import type { OpenBotDatabase } from "./openbot-database";
 import { isRecord } from "./protocol";
 import { recordRestartActivity } from "./restart-activity";
 
+const logger = createOpenBotLogger("mailbox-store");
 const MAX_ATTACHMENTS = INPUT_LIMITS.attachments;
 const FAILED_REQUEST_REASON_LIMIT = 2_000;
 const FAILED_REQUEST_KEY_PREFIX = "failed-request:";
 export const AUTO_RESULT_KEY_PREFIX = "auto-result:";
 const RESTARTED_RESULT_KEY_PREFIX = "restarted-result:";
+const RESTARTED_TURN_KEY_PREFIX = "restarted-turn:";
 const WELCOME_PENDING_STATUSES: ReadonlySet<QueueDeliveryStatus> = new Set(["queued", "starting", "running"]);
 export interface MessagingOrigin {
   linkId: string;
@@ -228,6 +230,7 @@ export interface DeliveryContext {
   channelId?: string;
   senderTaskId?: string;
   restartedResult?: true;
+  restartedTurnId?: string;
 }
 
 const EMPTY_STATE: StoredState = {
@@ -307,11 +310,16 @@ export class MailboxStore {
       );
       yield* this.#database.initialize();
       const stored = this.#database.readMailboxState();
+      const skippedDraftIds: string[] = [];
       if (stored !== null && stored !== undefined) {
-        const persisted = toCurrentMailboxState(stored);
-        if (!persisted || !isStoredState(persisted)) throw new Error("Stored mailbox projection is invalid.");
-        this.#state = normalizeStoredState(persisted);
-        if (JSON.stringify(this.#state) !== JSON.stringify(stored)) {
+        const persisted = readStoredMailboxState(stored);
+        this.#state = normalizeStoredState(persisted.state);
+        for (const row of persisted.skippedRows) if (row.kind === "draft" && row.id) skippedDraftIds.push(row.id);
+        if (persisted.skippedRows.length > 0) {
+          logger.warn("Stored mailbox rows that OpenBot cannot read were left out.", {
+            skippedRows: persisted.skippedRows,
+          });
+        } else if (JSON.stringify(this.#state) !== JSON.stringify(stored)) {
           this.#persist("mailbox.normalized", undefined, [], true);
         }
       } else {
@@ -333,7 +341,7 @@ export class MailboxStore {
         this.#persist("mailbox.drafts-cleared");
       }
       yield* this.#files
-        .resetDrafts(retainedDrafts.map((draft) => draft.id))
+        .resetDrafts([...retainedDrafts.map((draft) => draft.id), ...skippedDraftIds])
         .pipe(Effect.mapError(({ cause }) => new StoredStateFailure({ cause })));
       yield* this.#drainFileDeletionOutboxEffect();
       this.#initialized = true;
@@ -1125,7 +1133,7 @@ export class MailboxStore {
     });
   }
 
-  awaitsTeammate(agentId: string, taskId: string | null, turnIds: ReadonlySet<string>): boolean {
+  awaitsTeammate(agentId: string, taskId: string | null, turnIds: ReadonlySet<string> | null): boolean {
     const messages = this.#messagesById();
     const sourceTurnIds = this.#sourceTurnIds();
     return this.#state.deliveries.some((delivery) => {
@@ -1137,7 +1145,7 @@ export class MailboxStore {
         request.sender.agentId === agentId &&
         request.expectsReply !== false &&
         (request.senderTaskId ?? null) === taskId &&
-        turnIds.has(sourceTurnIds.get(request.id) ?? "") &&
+        (turnIds === null || turnIds.has(sourceTurnIds.get(request.id) ?? "")) &&
         (!held || this.heldByTask(delivery.recipientAgentId, request.id))
       );
     });
@@ -2096,11 +2104,11 @@ export class MailboxStore {
       .map((delivery) => delivery.recipientAgentId);
   }
 
-  joinsChatTurn(deliveryId: string): boolean {
+  joinsRunningTurn(deliveryId: string): boolean {
     const delivery = this.#state.deliveries.find((candidate) => candidate.id === deliveryId);
     if (delivery?.status !== "queued") return false;
     const message = this.#requireMessage(delivery.messageId);
-    if (message.channelId || message.messaging || message.taskId) return false;
+    if (message.channelId || message.messaging) return false;
     if (message.replyToMessageId !== null && message.expectsReply !== false) return false;
     return (
       !isAnswer(message) ||
@@ -2398,6 +2406,12 @@ export class MailboxStore {
     return reply !== undefined && isAnswer(reply) && this.#answeredRequestOf(agentId, reply) !== undefined;
   }
 
+  followsUpOwnAnswer(delivery: QueueDelivery): boolean {
+    if (delivery.sender.kind !== "agent" || !delivery.replyToMessageId || delivery.expectsReply !== false) return false;
+    const replied = this.#state.messages.find((message) => message.id === delivery.replyToMessageId);
+    return replied !== undefined && isAnswer(replied) && replied.sender.agentId === delivery.recipientAgentId;
+  }
+
   expectsReply(messageId: string): boolean {
     return this.#state.messages.find((message) => message.id === messageId)?.expectsReply !== false;
   }
@@ -2543,10 +2557,35 @@ export class MailboxStore {
     recipientAgentId: string,
     turnRequestIds: ReadonlySet<string>,
   ): boolean {
+    return this.#agentMessageFromTurnTo(agentId, turnId, recipientAgentId, turnRequestIds, () => true);
+  }
+
+  hasAgentReplyOrRequestFromTurnTo(
+    agentId: string,
+    turnId: string,
+    recipientAgentId: string,
+    turnRequestIds: ReadonlySet<string>,
+  ): boolean {
+    return this.#agentMessageFromTurnTo(
+      agentId,
+      turnId,
+      recipientAgentId,
+      turnRequestIds,
+      (message) => message.replyToMessageId !== null || message.expectsReply !== false,
+    );
+  }
+
+  #agentMessageFromTurnTo(
+    agentId: string,
+    turnId: string,
+    recipientAgentId: string,
+    turnRequestIds: ReadonlySet<string>,
+    counts: (message: StoredMessage) => boolean,
+  ): boolean {
     const turnIds = this.#sourceTurnIds();
     return this.#state.messages.some((message) => {
       if (message.sender.kind !== "agent" || message.sender.agentId !== agentId) return false;
-      if (turnIds.get(message.id) !== turnId) return false;
+      if (turnIds.get(message.id) !== turnId || !counts(message)) return false;
       if (message.replyToMessageId !== null && turnRequestIds.has(message.replyToMessageId)) return false;
       return this.#state.deliveries.some(
         (delivery) => delivery.messageId === message.id && delivery.recipientAgentId === recipientAgentId,
@@ -2742,9 +2781,7 @@ export class MailboxStore {
   }
 
   restorePersistedState(): void {
-    const persisted = toCurrentMailboxState(this.#database.readMailboxState());
-    if (!persisted || !isStoredState(persisted)) throw new Error("Stored mailbox projection is invalid.");
-    this.#state = normalizeStoredState(persisted);
+    this.#state = normalizeStoredState(readStoredMailboxState(this.#database.readMailboxState()).state);
     this.#keptConversationIndex = undefined;
     if (!this.#database.connection.isTransaction) this.#clearChanges();
   }
@@ -3210,6 +3247,8 @@ export class MailboxStore {
     )
       return false;
     this.#state.idempotency[key] = message.id;
+    if (delivery.status === "running" && delivery.turnId)
+      this.#state.idempotency[`${RESTARTED_TURN_KEY_PREFIX}${deliveryId}:${delivery.turnId}`] = message.id;
     yield* this.requeueRefused(deliveryId);
     return true;
   }, Effect.uninterruptible).bind(this);
@@ -3662,17 +3701,24 @@ export class MailboxStore {
     messages?: ReadonlyMap<string, StoredMessage>,
   ): DeliveryContext {
     const message = this.#requireMessage(delivery.messageId, messages);
+    const restarted =
+      this.#state.idempotency[`${RESTARTED_RESULT_KEY_PREFIX}${delivery.id}`] !== undefined &&
+      !delivery.resumeAfterUsageLimit &&
+      !delivery.planContinuation;
+    const turnKeyPrefix = `${RESTARTED_TURN_KEY_PREFIX}${delivery.id}:`;
+    const restartedTurnId = restarted
+      ? Object.keys(this.#state.idempotency)
+          .find((key) => key.startsWith(turnKeyPrefix))
+          ?.slice(turnKeyPrefix.length)
+      : undefined;
     return {
       delivery: this.#publicDelivery(delivery, positions, message),
       ...(delivery.resumeAfterUsageLimit ? { resumeAfterUsageLimit: delivery.resumeAfterUsageLimit } : {}),
       ...(delivery.planContinuation ? { planContinuation: delivery.planContinuation } : {}),
       ...(message.channelId ? { channelId: message.channelId } : {}),
       ...(message.senderTaskId ? { senderTaskId: message.senderTaskId } : {}),
-      ...(this.#state.idempotency[`${RESTARTED_RESULT_KEY_PREFIX}${delivery.id}`] !== undefined &&
-      !delivery.resumeAfterUsageLimit &&
-      !delivery.planContinuation
-        ? { restartedResult: true as const }
-        : {}),
+      ...(restarted ? { restartedResult: true as const } : {}),
+      ...(restartedTurnId ? { restartedTurnId } : {}),
       managedAttachments: message.attachments.map((attachment) => ({
         ...toAttachmentSummary(attachment),
         path: attachment.path,
@@ -3958,6 +4004,75 @@ function withCurrentAgentKeys(value: DynamicRecord, renames: Readonly<Record<str
       return value[current] === undefined ? [[current, entry]] : [];
     }),
   );
+}
+
+interface SkippedMailboxRow {
+  kind: "message" | "delivery" | "draft" | "generated-attachment" | "reaction" | "paused-agent" | "idempotency";
+  id: string | null;
+}
+
+function readStoredMailboxState(stored: unknown): { state: StoredState; skippedRows: SkippedMailboxRow[] } {
+  const value: DynamicRecord = toCurrentMailboxState(stored) ?? {};
+  const { version, messages, deliveries, drafts, generatedAttachments, pausedAgentIds, idempotency, reactions } = value;
+  if (
+    (version !== 1 && version !== 2 && version !== 3) ||
+    !Array.isArray(messages) ||
+    !Array.isArray(deliveries) ||
+    !Array.isArray(drafts) ||
+    (generatedAttachments !== undefined && !Array.isArray(generatedAttachments)) ||
+    !Array.isArray(pausedAgentIds) ||
+    !isRecord(idempotency) ||
+    !Array.isArray(reactions)
+  )
+    throw new Error(sourceText("error.backend.mailboxStateCorrupt"));
+  const skippedRows: SkippedMailboxRow[] = [];
+  const keepReadable = <Row>(
+    kind: SkippedMailboxRow["kind"],
+    rows: readonly unknown[],
+    isReadable: (row: unknown) => row is Row,
+  ): Row[] =>
+    rows.filter((row): row is Row => {
+      if (isReadable(row)) return true;
+      skippedRows.push({ kind, id: storedRowId(row) });
+      return false;
+    });
+  const keptMessages = keepReadable("message", messages, isStoredMessage);
+  const skippedMessageIds = new Set(skippedRows.map((row) => row.id));
+  return {
+    state: {
+      ...value,
+      version: 3,
+      messages: keptMessages,
+      deliveries: keepReadable(
+        "delivery",
+        deliveries,
+        (row): row is StoredDelivery => isStoredDelivery(row) && !skippedMessageIds.has(row.messageId),
+      ),
+      drafts: keepReadable("draft", drafts, isStoredDraft),
+      generatedAttachments: keepReadable(
+        "generated-attachment",
+        generatedAttachments ?? [],
+        isStoredGeneratedAttachment,
+      ),
+      pausedAgentIds: keepReadable("paused-agent", pausedAgentIds, isString),
+      idempotency: Object.fromEntries(
+        keepReadable(
+          "idempotency",
+          Object.entries(idempotency),
+          (entry): entry is [string, string] =>
+            Array.isArray(entry) && isString(entry[1]) && !skippedMessageIds.has(entry[1]),
+        ),
+      ),
+      reactions: keepReadable("reaction", reactions, isStoredReaction),
+    },
+    skippedRows,
+  };
+}
+
+function storedRowId(row: unknown): string | null {
+  if (!isRecord(row)) return null;
+  if (isString(row.id)) return row.id;
+  return isString(row.messageId) ? row.messageId : null;
 }
 
 function isStoredState(value: unknown): value is StoredState {

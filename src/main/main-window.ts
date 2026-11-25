@@ -306,6 +306,7 @@ export function createMainWindowController({
         sandbox: true,
         nodeIntegration: false,
         webSecurity: true,
+        backgroundThrottling: !backgroundWindows,
       },
     });
     hideMenuBar(window);
@@ -320,7 +321,8 @@ export function createMainWindowController({
           testClientEnabled: developmentTestClientEnabled,
         })
       ) {
-        window.show();
+        if (backgroundWindows) window.showInactive();
+        else window.show();
       }
     });
     window.on("close", (event) => {
@@ -917,6 +919,15 @@ export function sendComputerUseHighlightPlacement(
 }
 
 let windowsKeptHidden = false;
+let backgroundWindows = false;
+
+export function openWindowsInBackground(): void {
+  backgroundWindows = true;
+}
+
+export function windowsOpenInBackground(): boolean {
+  return backgroundWindows;
+}
 
 export function keepWindowsHidden(): void {
   windowsKeptHidden = true;
@@ -952,6 +963,13 @@ export function loadDynamicIslandRenderer(window: BrowserWindow, display: Displa
     url.searchParams.set("notch-height", String(notch.height));
   }
   return window.loadURL(url.toString());
+}
+
+function closeFocusedDevTools(): void {
+  webContents
+    .getAllWebContents()
+    .find((contents) => !contents.isDestroyed() && contents.isDevToolsFocused())
+    ?.closeDevTools();
 }
 
 function zoomFocusedContents(interfaceSize: InterfaceSizeService, step: InterfaceSizeStep): void {
@@ -1072,6 +1090,12 @@ export function configureApplicationMenu(
           { role: "reload" },
           { role: "forceReload" },
           { role: "toggleDevTools" },
+          {
+            label: translate("menu.closeDeveloperTools"),
+            accelerator: "F12",
+            visible: false,
+            click: closeFocusedDevTools,
+          },
           { type: "separator" },
           {
             label: translate("menu.actualSize"),

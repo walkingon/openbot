@@ -48,6 +48,7 @@ import type { SidebarAgentWait } from "@openbot/ui/features/sidebar/sidebar-agen
 import type { JSX } from "@solidjs/web";
 import type { ConnectorRegistry } from "../connectors/connector-registry";
 import type { AppSettingLinkId } from "../settings/setting-link-targets";
+import type { ChannelReplyView } from "../speech/speech-replies";
 import type { ConversationRuntime } from "./conversation-runtime";
 import type { ServerInstallWatch } from "./ServerInstallChatCard";
 import type { TurnStepLines } from "./turn-step-lines";
@@ -88,6 +89,8 @@ export interface ConversationChannelSource {
   interactionAgentName: () => string | undefined;
   awaitingReplies: () => readonly AwaitingReplyItem[];
   stopAwaitingReply?: ((taskId: string) => void) | undefined;
+  replyView: () => ChannelReplyView;
+  voiceAgent: () => AgentProfile | undefined;
   HeaderTitle: (props: { onOpenSettings: () => void }) => JSX.Element;
   SettingsPane: (props: ConversationChannelSettingsPaneProps) => JSX.Element;
   AboveComposer: () => JSX.Element;
@@ -234,7 +237,7 @@ export interface ConversationProps {
   onDeleteAgentHistory?: (() => Promise<void>) | undefined;
   onCompactAgentContext?: (() => Promise<void>) | undefined;
   onRespondToBrowserTakeover: (decision: "complete" | "cancel", options?: PromptAnswerOptions) => Promise<boolean>;
-  onCancelQueuedMessage: (deliveryId: string) => void;
+  onCancelQueuedMessage: (deliveryId: string, recipientAgentId?: string) => void;
   onCancelWait?: ((waitId: string) => void) | undefined;
   onSteerQueuedMessage: (deliveryId: string) => void;
   onSendQueuedMessageNow?: ((deliveryId: string) => void) | undefined;

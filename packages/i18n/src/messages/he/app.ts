@@ -51,7 +51,7 @@ export const messages = {
   "app.rail.website": "אתר OpenBot",
   "app.rail.agents": "סוכנים",
   "app.rail.schedule": "לוח זמנים",
-  "app.rail.tasks": "משימות",
+  "app.rail.tasks": "שרשורים",
   "app.rail.workflows": "תהליכי עבודה",
   "app.rail.usage": "שימוש",
   "app.rail.library": "ספרייה",
@@ -95,6 +95,7 @@ export const messages = {
     "סוכני ה-AI שלי עובדים עכשיו במחשב שלי עם OpenBot. הצ'אטים והקבצים שלי נשארים אצלי. אפשר לנסות: {site}",
   "app.socialFollow.redditTitle": "איך אני משתמש ב-OpenBot",
   "app.rail.usageRings": "שימוש ב-{name}: {windows}. פתיחת השימוש",
+  "app.rail.usageUnavailable": "השימוש ב-{name} לא זמין. פתיחת השימוש",
   "app.rail.customAgentUsage": "שימוש ב-{name}. פתיחת השימוש",
   "app.rail.moreUsage": {
     one: "חשבון נוסף אחד. פתיחת השימוש",
