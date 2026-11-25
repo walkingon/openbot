@@ -1,0 +1,510 @@
+name: Self-host Windows & Android build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "Build Windows x64 NSIS installer"
+        type: boolean
+        default: true
+      build_android:
+        description: "Build Android release APK"
+        type: boolean
+        default: true
+      android_package:
+        description: "Android package ID (applicationId)"
+        type: string
+        default: "run.openbot.mobile.selfhost"
+      android_app_name:
+        description: "Android launcher display name"
+        type: string
+        default: "OpenBot"
+      android_abis:
+        description: "Android ABIs (comma-separated)"
+        type: choice
+        options:
+          - "arm64-v8a"
+          - "armeabi-v7a,arm64-v8a"
+          - "armeabi-v7a,arm64-v8a,x86,x86_64"
+        default: "arm64-v8a"
+      android_version_code:
+        description: "Android versionCode (positive int; blank uses github.run_number)"
+        type: string
+        default: ""
+      release_mode:
+        description: "Output target: workflow artifacts only, or also create a GitHub Release"
+        type: choice
+        options:
+          - "artifacts-only"
+          - "draft-release"
+          - "publish-release"
+        default: "artifacts-only"
+      release_tag:
+        description: "GitHub Release tag when publishing (blank auto-generates)"
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: selfhost-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build Windows x64 installer
+    if: ${{ inputs.build_windows }}
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Read repository and version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="$(bun -p 'require("./package.json").version')"
+          repo_owner="${GITHUB_REPOSITORY_OWNER}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          {
+            echo "RELEASE_VERSION=$release_version"
+            echo "REPO_OWNER=$repo_owner"
+            echo "REPO_NAME=$repo_name"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Windows NSIS installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Invoke-Checked {
+            param([Parameter(Mandatory = $true)][scriptblock]$Command)
+            & $Command
+            if ($LASTEXITCODE -ne 0) {
+              throw "Command exited with code $LASTEXITCODE"
+            }
+          }
+          Invoke-Checked { bun run voice:prepare-runtime }
+          Invoke-Checked { bun scripts/prepare-remote-desktop-runtime.ts win32 x64 }
+          Invoke-Checked { bun run verify:remote-desktop-runtime --windows }
+          Invoke-Checked { bun scripts/install-cua-driver.ts win32 x64 }
+          Invoke-Checked { bun run build }
+          Invoke-Checked {
+            bunx electron-builder --win nsis --x64 --publish never `
+              "-c.publish.owner=$env:REPO_OWNER" `
+              "-c.publish.repo=$env:REPO_NAME"
+          }
+
+      - name: Verify packaged application metadata and launch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          bun run verify:package:win --require-update-metadata
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify installer and updater metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $appUpdatePath = "dist/win-unpacked/resources/app-update.yml"
+          if (-not (Test-Path -LiteralPath $appUpdatePath)) {
+            Write-Error "Missing $appUpdatePath"
+          }
+          $appUpdate = Get-Content -LiteralPath $appUpdatePath -Raw
+          if ($appUpdate -notmatch "(?m)^owner:\s*$([regex]::Escape($env:REPO_OWNER))\s*$") {
+            Write-Error "Expected app-update.yml owner '$env:REPO_OWNER', got:`n$appUpdate"
+          }
+          if ($appUpdate -notmatch "(?m)^repo:\s*$([regex]::Escape($env:REPO_NAME))\s*$") {
+            Write-Error "Expected app-update.yml repo '$env:REPO_NAME', got:`n$appUpdate"
+          }
+          if ($appUpdate -match "nightly-labs") {
+            Write-Error "app-update.yml must not reference nightly-labs:`n$appUpdate"
+          }
+          $installers = @(Get-ChildItem -Path dist -File -Filter *.exe)
+          if ($installers.Count -ne 1 -or -not (Test-Path -LiteralPath "dist/latest.yml")) {
+            Write-Error "Expected one EXE installer and dist/latest.yml."
+          }
+          if (-not (Select-String -Path dist/latest.yml -SimpleMatch "version: $env:RELEASE_VERSION" -Quiet)) {
+            Write-Error "dist/latest.yml is missing version: $env:RELEASE_VERSION"
+          }
+          if (-not (Select-String -Path dist/latest.yml -SimpleMatch ".exe" -Quiet)) {
+            Write-Error "dist/latest.yml is missing .exe entry."
+          }
+          bun run verify:update-artifacts windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = @(Get-ChildItem -Path dist -File -Filter *.exe)
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer[0].FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer[0].Name)" | Set-Content -Encoding ascii dist/SHA256SUMS-windows.txt
+          "WIN_INSTALLER_NAME=$($installer[0].Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WIN_INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: selfhost-windows-x64
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summarize Windows build
+        shell: pwsh
+        run: |
+          @(
+            "## Windows x64 Build Complete"
+            "- Version: ``$env:RELEASE_VERSION``"
+            "- Installer: ``$env:WIN_INSTALLER_NAME``"
+            "- SHA-256: ``$env:WIN_INSTALLER_SHA256``"
+            "- Auto-update target: ``$env:REPO_OWNER/$env:REPO_NAME``"
+            "- Server config: none embedded (unsigned build; connect at runtime via environment variables or UI)"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+  android:
+    name: Build Android APK
+    if: ${{ inputs.build_android }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      OPENBOT_SELFHOST_BUILD: "1"
+      EXPO_PUBLIC_APP_ENV: "production"
+      OPENBOT_ANDROID_PACKAGE: ${{ inputs.android_package }}
+      OPENBOT_ANDROID_APP_NAME: ${{ inputs.android_app_name }}
+      OPENBOT_ANDROID_VERSION_CODE: ${{ inputs.android_version_code || github.run_number }}
+      ANDROID_ABIS: ${{ inputs.android_abis }}
+      ORG_GRADLE_PROJECT_reactNativeArchitectures: ${{ inputs.android_abis }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs and signing configuration
+        id: check
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$OPENBOT_ANDROID_PACKAGE" =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$ ]]; then
+            echo "Invalid android_package '$OPENBOT_ANDROID_PACKAGE'. Expected e.g. run.openbot.mobile.selfhost." >&2
+            exit 1
+          fi
+          if [[ ! "$OPENBOT_ANDROID_VERSION_CODE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid android_version_code '$OPENBOT_ANDROID_VERSION_CODE'. Expected a positive integer." >&2
+            exit 1
+          fi
+          present=()
+          missing=()
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -n "${!name}" ]]; then
+              present+=("$name")
+            else
+              missing+=("$name")
+            fi
+          done
+          if (( ${#present[@]} == 4 )); then
+            echo "signing_mode=release" >> "$GITHUB_OUTPUT"
+          elif (( ${#present[@]} == 0 )); then
+            echo "signing_mode=debug" >> "$GITHUB_OUTPUT"
+          else
+            echo "Partial Android signing secrets configured. Missing: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Free runner disk
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Set up Bun and Node
+        uses: ./.github/actions/setup-bun
+        with:
+          install: none
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Give Gradle more memory
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle
+          echo 'org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8' >> ~/.gradle/gradle.properties
+          echo 'org.gradle.workers.max=2' >> ~/.gradle/gradle.properties
+          sudo fallocate -l 8G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          free -h
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prebuild Android project
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mobile_version="$(node -p 'require("./package.json").version')"
+          echo "MOBILE_VERSION=$mobile_version" >> "$GITHUB_ENV"
+
+          EXPO_CLI="$(node -p 'require.resolve("expo/bin/cli")')"
+          config_json="$(node "$EXPO_CLI" config --type public --json)"
+          jq -e '
+            .updates.enabled == false
+            and ((.updates.url // null) == null)
+            and (.android.package == env.OPENBOT_ANDROID_PACKAGE)
+          ' <<<"$config_json" >/dev/null
+
+          node "$EXPO_CLI" prebuild --platform android --clean --no-install
+
+          manifest="android/app/src/main/AndroidManifest.xml"
+          if ! grep -qE 'android:name="expo\.modules\.updates\.ENABLED"[^>]*android:value="false"|android:value="false"[^>]*android:name="expo\.modules\.updates\.ENABLED"' "$manifest"; then
+            echo "Expected expo.modules.updates.ENABLED=false in $manifest" >&2
+            exit 1
+          fi
+          if grep -qE 'updates\.openbot\.run|EXPO_UPDATE_URL' "$manifest"; then
+            echo "Found forbidden official OTA reference in $manifest" >&2
+            exit 1
+          fi
+
+          if ! grep -q '^org\.gradle\.caching=' android/gradle.properties; then
+            printf '\norg.gradle.caching=true\n' >> android/gradle.properties
+          fi
+
+      - name: Configure Android release signing
+        if: steps.check.outputs.signing_mode == 'release'
+        working-directory: apps/mobile
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keystore_path="$RUNNER_TEMP/selfhost-release.keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$keystore_path"
+          chmod 600 "$keystore_path"
+          keytool -list -keystore "$keystore_path" -alias "$ANDROID_KEY_ALIAS" -storepass:env ANDROID_KEYSTORE_PASSWORD >/dev/null
+          echo "OPENBOT_ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+          test -f android/app/build.gradle
+          cat >> android/app/build.gradle <<'GRADLE'
+
+          android {
+              signingConfigs {
+                  selfhostRelease {
+                      storeFile file(System.getenv("OPENBOT_ANDROID_KEYSTORE_PATH"))
+                      storePassword System.getenv("OPENBOT_ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("OPENBOT_ANDROID_KEY_ALIAS")
+                      keyPassword System.getenv("OPENBOT_ANDROID_KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.selfhostRelease
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Build Android release APK
+        working-directory: apps/mobile/android
+        shell: bash
+        env:
+          OPENBOT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OPENBOT_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          OPENBOT_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          vmstat -S M 30 &
+          trap 'kill $!' EXIT
+          ./gradlew assembleRelease --no-daemon --stacktrace "-PreactNativeArchitectures=$ANDROID_ABIS"
+
+      - name: Remove temporary keystore
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/selfhost-release.keystore"
+
+      - name: Verify and package Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$raw_apk"
+
+          apksigner="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | sort -V | tail -n 1)"
+          test -n "$apksigner"
+          verify_out="$("$apksigner" verify --print-certs "$raw_apk")"
+          echo "$verify_out"
+          cert_sha256="$(printf '%s\n' "$verify_out" | grep -m1 'SHA-256 digest:' | awk '{print $NF}')"
+
+          if [[ "$ANDROID_ABIS" == "armeabi-v7a,arm64-v8a,x86,x86_64" ]]; then
+            abi_label="universal"
+          else
+            abi_label="${ANDROID_ABIS//,/-}"
+          fi
+          apk_name="OpenBot-Android-${MOBILE_VERSION}-vc${OPENBOT_ANDROID_VERSION_CODE}-${abi_label}.apk"
+          out_dir="$RUNNER_TEMP/android-out"
+          mkdir -p "$out_dir"
+          cp "$raw_apk" "$out_dir/$apk_name"
+          (cd "$out_dir" && sha256sum "$apk_name" > SHA256SUMS-android.txt)
+          apk_sha256="$(awk '{print $1}' "$out_dir/SHA256SUMS-android.txt")"
+
+          {
+            echo "APK_NAME=$apk_name"
+            echo "APK_SHA256=$apk_sha256"
+            echo "CERT_SHA256=${cert_sha256:-unknown}"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: selfhost-android-apk
+          path: ${{ runner.temp }}/android-out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summarize Android build
+        shell: bash
+        env:
+          SIGNING_MODE: ${{ steps.check.outputs.signing_mode }}
+        run: |
+          {
+            echo "## Android APK Build Complete"
+            echo "- Version: \`$MOBILE_VERSION\` (versionCode \`$OPENBOT_ANDROID_VERSION_CODE\`)"
+            echo "- Package ID: \`$OPENBOT_ANDROID_PACKAGE\`"
+            echo "- ABIs: \`$ANDROID_ABIS\`"
+            echo "- Signing mode: \`$SIGNING_MODE\` (cert SHA-256: \`$CERT_SHA256\`)"
+            echo "- APK: \`$APK_NAME\`"
+            echo "- SHA-256: \`$APK_SHA256\`"
+            echo "- Server config: none embedded; official Expo OTA disabled (\`updates.enabled = false\`)"
+            if [[ "$SIGNING_MODE" == "debug" ]]; then
+              cat <<'NOTICE'
+
+          > **Note:** Built with the debug keystore because repository signing secrets are not configured. Future upgrades without uninstalling require signing with the same persistent release keystore via GitHub Secrets:
+          > `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
+          >
+          > Example:
+          > ```bash
+          > keytool -genkeypair -v -keystore openbot-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias openbot
+          > base64 -w0 openbot-release.jks
+          > ```
+          NOTICE
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish GitHub Release
+    needs: [windows, android]
+    if: ${{ always() && inputs.release_mode != 'artifacts-only' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.windows.result == 'success' || needs.android.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Windows artifact
+        if: needs.windows.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: selfhost-windows-x64
+          path: release-assets/windows
+
+      - name: Download Android artifact
+        if: needs.android.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: selfhost-android-apk
+          path: release-assets/android
+
+      - name: Prepare release assets and tag
+        shell: bash
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG_INPUT#"${RELEASE_TAG_INPUT%%[![:space:]]*}"}"
+          tag="${tag%"${tag##*[![:space:]]}"}"
+          if [[ -n "$tag" ]]; then
+            if [[ ! "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Invalid release_tag '$tag'. Use only letters, numbers, '.', '_', '-'." >&2
+              exit 1
+            fi
+          else
+            version="$(node -p 'require("./package.json").version')"
+            tag="selfhost-v${version}-r${GITHUB_RUN_NUMBER}"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+          shopt -s nullglob
+          sums=(release-assets/*/SHA256SUMS-*.txt)
+          if (( ${#sums[@]} > 0 )); then
+            cat "${sums[@]}" > release-assets/SHA256SUMS.txt
+          fi
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=()
+          for f in release-assets/windows/* release-assets/android/* release-assets/SHA256SUMS.txt; do
+            [[ -f "$f" ]] || continue
+            [[ "$(basename "$f")" == SHA256SUMS-*.txt ]] && continue
+            artifacts+=("$f")
+          done
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "No release assets found to upload." >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            if [[ "$RELEASE_MODE" == "publish-release" ]]; then
+              gh release edit "$RELEASE_TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+            fi
+          else
+            flags=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --generate-notes --title "OpenBot Selfhost $RELEASE_TAG" --notes "Self-hosted builds with no embedded server address.")
+            if [[ "$RELEASE_MODE" == "draft-release" ]]; then
+              flags+=(--draft)
+            elif [[ "$RELEASE_MODE" == "publish-release" ]]; then
+              flags+=(--latest)
+            fi
+            gh release create "$RELEASE_TAG" "${artifacts[@]}" "${flags[@]}"
+          fi
