@@ -35,6 +35,7 @@ import {
   teamWebRtcClientProtocol,
 } from "@openbot/contracts/team-protocol";
 import type { LiveVoiceEvent } from "@openbot/contracts/team-protocol/live-voice-v1";
+import { addNearPayments } from "@openbot/contracts/team-protocol/near-payment-v1";
 import { optionalTeamEvent, optionalTeamEventToCurrent } from "@openbot/contracts/team-protocol/optional-events";
 import { addPromptQuestionDetails } from "@openbot/contracts/team-protocol/prompt-detail-v1";
 import { teamSideRouteCodec } from "@openbot/contracts/team-protocol/side-routes";
@@ -47,6 +48,11 @@ import {
   toWireTeamProtocolV1ClientEvent,
 } from "@openbot/contracts/team-protocol/v1-adapter";
 import { TEAM_PROTOCOL_V9 } from "@openbot/contracts/team-protocol/v9";
+import {
+  WORKFLOW_SPOT_CONTROL,
+  type WorkflowSpotControl,
+  type WorkflowSpotInput,
+} from "@openbot/contracts/team-protocol/workflow-presence-v1";
 import { sourceText } from "@openbot/i18n/source";
 import { errorReference, referenceFrom } from "@openbot/user-errors/reference";
 import { Context, Deferred, Effect, Exit, Layer, ManagedRuntime, Result, Schema, Scope, Semaphore } from "effect";
@@ -586,6 +592,11 @@ export function createRemoteTeamPeer(
           lastTyping = null;
         },
       );
+    },
+    setWorkflowSpot(input: WorkflowSpotInput) {
+      const state = peer;
+      if (!state || !isPeerOnline(state)) return;
+      void runPeerEffect(sendEventControl(state, { type: WORKFLOW_SPOT_CONTROL, ...input })).catch(() => undefined);
     },
     execute: (command: RemoteTeamCommand) => runPeerEffect(executeCommand(command, actions)),
     setWaitForHost(value: boolean) {
@@ -1551,13 +1562,25 @@ export function createRemoteTeamPeer(
       if (state.channels[kind] !== channel) return;
       failPeer(
         state,
-        referenced(sourceText("error.remote.dataChannelFailed", { kind }), referenceFrom("webrtc", "channel", kind)),
+        state.binding && !state.authenticated
+          ? referenced(sourceText("error.remote.signInConnectionClosed"), "webrtc/channel/sign_in_closed")
+          : referenced(
+              sourceText("error.remote.dataChannelFailed", { kind }),
+              referenceFrom("webrtc", "channel", kind),
+            ),
         actions,
       );
     };
     channel.onclose = () => {
-      if (state.authenticated && state.channels[kind] === channel)
+      if (state.channels[kind] !== channel) return;
+      if (state.authenticated)
         failPeer(state, referenced(sourceText("error.remote.desktopOffline"), "webrtc/channel/closed"), actions);
+      else if (state.binding)
+        failPeer(
+          state,
+          referenced(sourceText("error.remote.signInConnectionClosed"), "webrtc/channel/sign_in_closed"),
+          actions,
+        );
     };
   }
 
@@ -1718,6 +1741,7 @@ export function createRemoteTeamPeer(
           addUiBlockAutoAnswers(decoded.event, frame.payload);
           addUiBlockVaultRequests(decoded.event, frame.payload);
           addUiBlockLocationRequests(decoded.event, frame.payload);
+          addNearPayments(decoded.event, frame.payload);
           addSkillSuggestionNames(decoded.event, frame.payload);
           addPromptQuestionDetails(decoded.event, frame.payload);
         }
@@ -2037,7 +2061,7 @@ export function createRemoteTeamPeer(
     }, 16);
   }
 
-  function sendEventControl(state: PeerState, control: TeamProtocolV1CurrentEventControl) {
+  function sendEventControl(state: PeerState, control: TeamProtocolV1CurrentEventControl | WorkflowSpotControl) {
     return Effect.fn("RemotePeer.sendEventControl")(function* () {
       yield* sendPayload(
         state,
@@ -2046,7 +2070,7 @@ export function createRemoteTeamPeer(
           encodeTeamProtocolV2Frame({
             version: 2,
             type: "event-control",
-            control: toWireTeamProtocolV1ClientEvent(control),
+            control: control.type === WORKFLOW_SPOT_CONTROL ? control : toWireTeamProtocolV1ClientEvent(control),
           }),
         ),
       );
@@ -2468,6 +2492,7 @@ function withWireBlockExtensions<T>(state: PeerState, decoded: T, wire: unknown)
     addUiBlockAutoAnswers(decoded, wire);
     addUiBlockVaultRequests(decoded, wire);
     addUiBlockLocationRequests(decoded, wire);
+    addNearPayments(decoded, wire);
     addSkillSuggestionNames(decoded, wire);
     addPromptQuestionDetails(decoded, wire);
   }

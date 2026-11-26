@@ -14,6 +14,7 @@ import type {
   ClientAgentSummary,
   ConversationMemoryChange,
   ConversationMessageSender,
+  ConversationNearPayment,
   ConversationPlan,
   ConversationQuestionPrompt,
   ConversationReaction,
@@ -44,6 +45,7 @@ export type MessageKind =
   | "plan"
   | "subagents"
   | "memory-changes"
+  | "near-payment"
   | "error";
 
 export interface AgentMessagePlan extends ConversationPlan {
@@ -161,6 +163,7 @@ export type ChatActionMarkerModel =
   | { kind: "channel-change"; text: string; timestamp: string }
   | { kind: "vault-change"; text: string; timestamp: string }
   | { kind: "plan-continuation"; text: string; timestamp: string }
+  | { kind: "no-answer"; text: string; timestamp: string }
   | { kind: "sign-in-failure"; provider: AgentProviderId; text: string; timestamp: string }
   | {
       kind: "instructions-change";
@@ -209,6 +212,7 @@ export interface AgentMessage {
   videoGeneration?: VideoGenerationInfo | undefined;
   questionPrompt?: ConversationQuestionPrompt | undefined;
   uiBlock?: ConversationUiBlock;
+  nearPayment?: ConversationNearPayment | undefined;
   citations?: MessageCitation[];
   exchange?: AgentExchangeSummary | undefined;
   reaction?: MessageReaction | null | undefined;

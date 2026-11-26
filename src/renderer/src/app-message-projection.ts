@@ -11,6 +11,7 @@ import {
   hostedSiteConversationEvent,
   isChannelChangeMarker,
   isContextResetMarker,
+  isNoAnswerNotice,
   isPlanContinuationMarker,
   isVaultChangeMarker,
   marketplaceSuggestionEvent,
@@ -110,15 +111,17 @@ export function toAgentMessage(message: ConversationMessage, ownerAgentId?: stri
     ...(message.itemType === undefined ? {} : { itemType: message.itemType }),
     kind: message.questionPrompt
       ? "question"
-      : actionMarker
-        ? "action-marker"
-        : plan
-          ? "plan"
-          : subagents?.length
-            ? "subagents"
-            : memoryChanges
-              ? "memory-changes"
-              : "text",
+      : message.nearPayment
+        ? "near-payment"
+        : actionMarker
+          ? "action-marker"
+          : plan
+            ? "plan"
+            : subagents?.length
+              ? "subagents"
+              : memoryChanges
+                ? "memory-changes"
+                : "text",
     ...(exchangeSenderId === undefined ? {} : { senderAgentId: exchangeSenderId }),
     ...(senderMember === undefined ? {} : { senderMember }),
     ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }),
@@ -129,6 +132,7 @@ export function toAgentMessage(message: ConversationMessage, ownerAgentId?: stri
     ...(message.videoGeneration === undefined ? {} : { videoGeneration: message.videoGeneration }),
     ...(message.questionPrompt === undefined ? {} : { questionPrompt: message.questionPrompt }),
     ...(message.uiBlock ? { uiBlock: message.uiBlock } : {}),
+    ...(message.nearPayment ? { nearPayment: message.nearPayment } : {}),
     ...(message.exchange === undefined ? {} : { exchange: message.exchange }),
     ...(message.reaction === undefined ? {} : { reaction: message.reaction }),
     reactions:
@@ -331,6 +335,7 @@ export function agentMessagesEqual(left: AgentMessage, right: AgentMessage): boo
     sameJson(left.imageGeneration, right.imageGeneration) &&
     sameJson(left.videoGeneration, right.videoGeneration) &&
     sameJson(left.uiBlock, right.uiBlock) &&
+    sameJson(left.nearPayment, right.nearPayment) &&
     sameJson(left.memoryChanges, right.memoryChanges) &&
     sameJson(left.trace, right.trace)
   );
@@ -425,6 +430,7 @@ function chatActionMarker(
   if (isVaultChangeMarker(message)) return { kind: "vault-change", text: message.text, timestamp: message.createdAt };
   if (isPlanContinuationMarker(message))
     return { kind: "plan-continuation", text: message.text, timestamp: message.createdAt };
+  if (isNoAnswerNotice(message)) return { kind: "no-answer", text: message.text, timestamp: message.createdAt };
   const signInProvider = signInFailureProvider(message);
   if (signInProvider)
     return { kind: "sign-in-failure", provider: signInProvider, text: message.text, timestamp: message.createdAt };
